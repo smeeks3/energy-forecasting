@@ -1,0 +1,481 @@
+---
+title: "Energy Report Code"
+author: "Steven Meeks"
+date: "2025-11-04"
+output: html_document
+---
+
+# Load Data
+
+-   CHANGE PATH TO FILE
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(datasets)
+library(fpp3)
+library(forecast)
+library(fable)
+library(fabletools)
+
+#Read in the data
+energy = read_csv('https://raw.githubusercontent.com/sjsimmo2/TimeSeries/refs/heads/master/energy_F2025.csv')
+```
+
+## Aggregate Data
+
+-   Forecasting total daily energy load
+
+```{r}
+#aggregate mw by daily total
+energy_daily <- energy %>% 
+  mutate(date=mdy_hm(datetime_beginning_ept))%>%
+  mutate(day = as_date(date)) %>% 
+  group_by(day) %>% 
+  summarise(daily_total = sum(mw, na.rm = TRUE)) 
+
+#as tsibble
+energy.ts<-energy_daily %>%
+  as_tsibble(index = day)
+
+energy.ts 
+```
+
+## Train/Test Split
+```{r}
+# Training (Aug 2018-Aug 2023)
+train <- energy.ts |> 
+  filter(day >= as_date('2018-08-01') & day <= as_date('2023-08-31')) 
+
+# Validation (Sep 2023-Aug 2024)
+valid <- energy.ts |> 
+  filter(day >= as_date('2023-09-01') & day <= as_date('2024-08-31')) 
+
+# Testing (Sep 2024-Aug 2025)
+test <- energy.ts |> 
+  filter(day >= as_date('2024-09-01') & day <= as_date('2025-01-31'))
+```
+
+## View Time Plot
+```{r}
+#time plot
+autoplot(energy.ts, daily_total)
+```
+
+# ESM
+
+## Find Best Model
+```{r}
+#Fit models
+energy_fit <- train |>
+  model(
+    SES = ETS(daily_total ~ error("A") + trend("N") + season("N")),
+    Linear = ETS(daily_total ~ error('A') + trend('A') + season("N")),
+    LinearDamp = ETS(daily_total ~ error('A') + trend('Ad') + season("N")),
+    HWAdd = ETS(daily_total ~ error("A") + trend("A") + season("A")),
+    HWMult = ETS(daily_total ~ error("M") + trend("A") + season("M")),
+    Search1 = ETS(daily_total)
+)
+
+#goodness of fit
+glance(energy_fit) |>
+  arrange(AIC)
+  #search model - lowest AIC
+
+#FORECASTING
+#forecast for all models
+energy.for <- energy_fit |> fabletools::forecast(h = 366)
+
+#accuracy
+fabletools::accuracy(energy.for, valid) |>
+  arrange(MAPE)
+
+#Examine search model
+energy_fit |>
+  select(Search1) |>
+  report()
+
+#Search Model --> MNA components
+  #multiplicative error
+  #no trend
+  #additive seasonality
+```
+
+Best Model: Search ETS(M,N,A)
+
+-   Validation Performance
+    -   MAPE = 10.23
+    -   MAE = 11332.69
+
+## ESM Forecast Plot
+
+```{r}
+#ETS search model
+energy_esm <- train |> model(ETS(daily_total ~ error("M") + trend("N") + season("A")))
+#forecasts
+energy.for2 <- energy_esm |> fabletools::forecast(h = 366)
+                                    # forecast length of validation
+
+library(ggplot2)
+
+#Plot forecast vs actual
+ggplot() +
+  geom_line(data = valid, aes(x = day, y = daily_total, colour = "Actual"), linewidth = 0.95) +
+  geom_line(data = energy.for2, aes(x = day, y = .mean, colour = "Forecast"), linewidth = 0.95) +
+  scale_colour_manual(name = "Data", values = c("Actual" = "black", "Forecast" = "#2596be")) +
+  labs(
+    title = "ESM Model Validation Performance: Actual vs. Forecast",
+    subtitle = "Total Daily Energy Load",
+    x = "Month",
+    y = "Energy in Megawatts (MW)"
+  ) +
+  theme_minimal()
+```
+
+# ARIMA
+
+Objective: Seasonal ARIMA
+
+-   describe approach for selecting lags
+-   forecast model to validation
+-   calculate MAE and MAPE for validation
+
+## Seasonal Stationarity
+
+```{r}
+#unit root test - weekly period
+train %>%
+  features(daily_total, unitroot_nsdiffs, period = 7) #weekly period (yearly is too large)
+    # no seasonal differences
+
+#STL decomp
+dcmp <- train |> 
+  model(stl = STL(daily_total)) 
+
+#components
+components(dcmp) |> 
+  autoplot() + theme_classic()
+    #season_year 
+    #season_week
+
+# feature strength - weekly
+train |>
+features(daily_total, feat_stl, period=7)
+  # Fs < 0.64 -- no seasonal differencing
+```
+
+## Seasonality
+
+### Fourier Terms
+
+```{r}
+# Fourier Terms - Weekly and Yearly
+
+# ranges for k
+k_weekly  <- 1:3
+K_yearly <- 1:13
+
+# grid of combinations
+K_grid <- expand.grid(Kw = k_weekly, Ky = K_yearly)
+
+# all fourier term combos
+model_defs <- setNames(
+  lapply(seq_len(nrow(K_grid)), function(i) {
+    ARIMA(
+      daily_total ~
+        fourier(period=7, K=K_grid$Kw[i]) +
+        fourier(period=365.25, K=K_grid$Ky[i]) +
+        pdq(0,0,0) + PDQ(0,0,0)
+    )
+  }),
+  paste0("KW", K_grid$Kw, "_KY", K_grid$Ky)
+)
+
+# Fit all models
+model_FYW <- train |>
+  model(!!!model_defs)
+
+# examine goodness of fit
+glance(model_FYW) |>
+  arrange(AICc)
+
+#Best
+  ## Weekly - k=3 is consistently better at same yearly-k
+  ## yearly - concern for overfit - favoring largest k
+```
+
+### Plot Yearly-K
+
+```{r}
+#Plot Yearly K by Info Criteria
+
+#prep data
+grid_stats <- model_FYW |> 
+  glance() |>
+  mutate(
+    Kw = as.numeric(sub("KW([0-9]+)_KY([0-9]+)", "\\1", .model)),
+    Ky = as.numeric(sub("KW([0-9]+)_KY([0-9]+)", "\\2", .model))
+  )
+
+#selected weekly k
+chosen_weekly_K <- 3
+
+#format data
+elbow_data <- grid_stats |> 
+  filter(Kw == chosen_weekly_K) |>
+  select(Ky, AICc)
+
+# Reshape for plotting
+elbow_long <- elbow_data |>
+  pivot_longer(cols = c(AICc), names_to = "Criterion", values_to = "Value")
+
+#plot
+ggplot(elbow_long, aes(x = Ky, y = Value)) +
+  geom_line(size = 1, color = '#2596be') +
+  geom_point(color = '#2596be') +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 5)) +
+  theme_minimal() +
+  labs(
+    title = "Yearly Fourier Term Selection Plot",
+    subtitle = "Weekly K = 3",
+    x = "Number of Yearly Fourier K Terms",
+    y = "Corrected Akaike Information Criteria (AICc) ",
+  )
+
+# K=2 limits complexity without sacrificing much AICc
+```
+
+## Residuals
+
+### Stationarity
+```{r}
+#final fourier only model
+season_model <- train |> model(ARIMA(daily_total ~ fourier(period=7, K=3) + fourier(period=365.25, K=2) + pdq(0,0,0) + PDQ(0,0,0)))
+
+#stationarity tests
+augment(season_model) %>% features(.resid, unitroot_kpss)
+augment(season_model) %>% features(.resid, unitroot_ndiffs)
+    # ndiffs = 1 difference needed
+    # kpss = reject null of stationarity
+
+#Need 1 difference
+
+#add difference
+season_model2 <- train |> model(ARIMA(daily_total ~ fourier(period=7, K=3) + fourier(period=365.25, K=2) + pdq(0,1,0) + PDQ(0,0,0)))
+
+#stationarity tests
+augment(season_model2) %>% features(.resid, unitroot_kpss)
+augment(season_model2) %>% features(.resid, unitroot_ndiffs)
+
+#No further differences
+```
+
+### Correlation Plot
+
+```{r}
+#overview
+season_model2 |>
+  gg_tsresiduals(lag=21)
+
+#residuals
+model_residuals <- residuals(season_model2)
+residuals <- my_residuals$.resid
+
+#ACF Plot
+acf_plot <- ggAcf(residuals, lag.max = 21) +
+    theme_minimal() +
+  labs(
+    title = "ACF of Residuals",
+    subtitle = paste("Model Residuals ( N =", length(residuals),")"),
+    y = "Autocorrelation"
+  ) +
+  # Customize line and bar appearance for a clean look
+  theme(
+    plot.title = element_text(face = "bold"),
+    plot.subtitle = element_text(color = "gray30")
+  )
+
+#PACF Plot
+pacf_plot <- ggPacf(residuals, lag.max = 21) +
+  # Customize appearance
+  theme_minimal() +
+  labs(
+    title = "PACF of Residuals",
+    subtitle = paste("Model Residuals ( N =",length(residuals),")"),
+    y = "Partial Autocorrelation"
+  ) +
+  # Match theme elements
+  theme(
+    plot.title = element_text(face = "bold"),
+    plot.subtitle = element_text(color = "gray30")
+  )
+
+
+
+print(acf_plot)
+print(pacf_plot)
+
+
+#ACF
+  # 4 spikes -- try a few non-seasonal MA
+  # spikes 14-15  -- try seasonal MA
+#PACF
+  # decreasing spikes up to 15 -- try some AR terms
+  #try a few seasonal AR
+```
+
+
+## Seasonal ARIMA
+
+### ARMA Models Loop
+
+- Check AR terms ~4 based on spikes in PACF
+- Check MA terms ~2 based on spikes in ACF
+- Seasonal 1 AR or MA terms
+
+```{r}
+# Define search ranges
+p_lag <- 3:4
+q_lag <- 1:2
+P_lag <- 0:2
+Q_lag <- 0:2
+
+# Create parameter grid
+param_grid <- expand.grid(p = p_lag, d = 1, q = q_lag, P = P_lag, D = 0, Q = Q_lag)
+
+
+# Fit models
+models <- param_grid %>%
+  mutate(
+    model = pmap(list(p, d, q, P, D, Q), function(p, d, q, P, D, Q) {
+      train %>%
+        model(
+          ARIMA(
+            daily_total ~ 0 + fourier(period = 7, K = 3) +
+              fourier(period = 365.25, K = 2) +
+              pdq(p, d, q) + PDQ(P, D, Q)
+          )
+        )
+    })
+  )
+
+# AICc for comparison
+results <- models %>%
+  mutate(
+    AICc = map_dbl(model, ~ glance(.x)$AICc)
+  ) %>%
+  arrange(AICc)
+
+# View top models
+head(results)
+```
+- AR3MA1_AR2MA2 = 37795.14
+- AR4MA1_AR2MA2 = 37796.97
+- AR3MA2_AR2MA2 = 37797.34
+- AR3MA1_AR1    = 37797.37
+- AR3MA1_MA1    = 33797.43
+
+
+```{r}
+#top 5 models by AICc for further comparison
+top_models <- train %>%
+  model(
+  AR3MA1_AR2MA2 = ARIMA(daily_total ~ 0 + fourier(period=7, K=3) + fourier(period=365.25, K=2) + pdq(3,1,1) + PDQ(2,0,2)),
+  AR4MA1_AR2MA2 = ARIMA(daily_total ~ 0 + fourier(period=7, K=3) + fourier(period=365.25, K=2) + pdq(4,1,1) + PDQ(2,0,2)),
+  AR3MA2_AR2MA2 = ARIMA(daily_total ~ 0 + fourier(period=7, K=3) + fourier(period=365.25, K=2) + pdq(3,1,2) + PDQ(2,0,2)),
+  AR3MA1_AR1 = ARIMA(daily_total ~ 0 + fourier(period=7, K=3) + fourier(period=365.25, K=2) + pdq(3,1,1) + PDQ(1,0,0)),
+  AR3MA1_MA1 = ARIMA(daily_total ~ 0 + fourier(period=7, K=3) + fourier(period=365.25, K=2) + pdq(3,1,1) + PDQ(0,0,1)),
+  #Add search method
+  Search = ARIMA(daily_total ~ 0 + fourier(period=7, K=3) + fourier(period=365.25, K=2) + pdq(,1,) + PDQ(,0,))
+)
+```
+
+### Performance
+```{r}
+#FORECASTING
+#forecast for top models
+arima.for <- top_models |> fabletools::forecast(h = 366)
+
+#compare accuracy
+fabletools::accuracy(arima.for, valid) |>
+  arrange(MAPE)
+
+#view search 
+top_models |>
+  select(Search) |>
+  report()
+
+#search does not produce white noise
+
+#final model
+  #SARIMA(3,1,1)(2,0,2) model - lowest MAE and MAPE after search
+    # best generalized model - has white noise
+```
+Best Model: SARIMAX(3,1,1)(2,0,2)
+
+-   Validation Performance
+    -   MAPE = 6.806
+    -   MAE = 7296.023
+
+
+### White Noise
+```{r}
+#test white noise
+
+#search model
+search <- train |> model(ARIMA(daily_total ~ 0 + fourier(period=7, K=3) + fourier(period=365.25, K=2) + pdq(0,1,4) + PDQ(1,0,0)))
+
+#View residuals
+search |>
+  gg_tsresiduals(lag=21)
+
+#white noise?
+augment(search) |>
+  features(.innov, ljung_box, lag = 21, dof = 5)
+  #Search does not have white noise
+
+
+
+#hand model
+sarimax <- train |> model(ARIMA(daily_total ~ 0 + fourier(period=7, K=3) + fourier(period=365.25, K=2) + pdq(3,1,1) + PDQ(2,0,2)))
+
+#View residuals
+sarimax |>
+  gg_tsresiduals(lag=21)
+
+#Ljung-box
+augment(sarimax) |>
+  features(.innov, ljung_box, lag = 21, dof = 8)
+  #hand model has white noise
+```
+
+
+## Forecast Plot
+```{r}
+#forecast
+arima.for2 <- sarimax |> fabletools::forecast(h = 365)
+                                    # forecast length of validation
+
+fabletools::accuracy(arima.for2, valid) |>
+  arrange(MAPE)
+
+library(ggplot2)
+
+#Plot forecast vs actual
+ggplot() +
+  geom_line(data = valid, aes(x = day, y = daily_total, colour = "Actual"), linewidth = 0.95) +
+  geom_line(data = arima.for2, aes(x = day, y = .mean, colour = "Forecast"), linewidth = 0.95) +
+  scale_colour_manual(name = "Data", values = c("Actual" = "black", "Forecast" = "#2596be")) +
+  labs(
+    title = "SARIMA Model Validation Performance: Actual vs. Forecast",
+    subtitle = "Total Daily Energy Load",
+    x = "Month",
+    y = "Energy in Megawatts (MW)"
+  ) +
+  theme_minimal()
+```
+
+
+
+
