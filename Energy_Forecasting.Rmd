@@ -20,7 +20,7 @@ library(fable)
 library(fabletools)
 
 #Read in the data
-energy = read_csv('https://raw.githubusercontent.com/sjsimmo2/TimeSeries/refs/heads/master/energy_F2025.csv')
+energy = read_csv('energy_2025.csv')
 ```
 
 ## Aggregate Data
