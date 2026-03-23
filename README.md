@@ -28,8 +28,7 @@ The SARIMA model captures both weekly fluctuations and the broader yearly season
 energy-load-forecasting/
 ├── energy_2025.csv
 ├── Energy_Forecasting.Rmd
-└── reports/
-    └── Report.pdf
+└── Report.pdf
 ```
 
 ## Getting Started
