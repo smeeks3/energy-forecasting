@@ -1,59 +1,49 @@
 # Energy Load Forecasting
 
-Forecasts total daily electricity demand (MW) for the PJM AEP load area using seven years of hourly grid data. Two classical time series families — Exponential Smoothing (ETS) and Seasonal ARIMA with Fourier terms (SARIMAX) — are built and compared on a held-out validation year. The best model, SARIMAX(3,1,1)(2,0,2) with weekly and yearly Fourier terms, achieves a validation MAPE of **6.81%** and MAE of **7,296 MW**, outperforming the best ETS model by ~35%.
+A time series forecasting project for American Electric Power's Appalachian Power Territory (AEPAPT), comparing Exponential Smoothing (ESM) and Seasonal ARIMA (SARIMA) models to predict total daily energy demand. The full business write-up is available in `reports/Report.pdf`.
 
 ## Overview
 
-Grid operators and energy traders need reliable short-horizon load forecasts to balance supply and demand, schedule generation assets, and manage costs. This project applies classical time series methods to real hourly PJM load data, aggregated to daily totals, with model selection driven by a held-out validation year (Sep 2023 – Aug 2024). The dataset (`energy_2025.csv`) covers **August 2018 through August 2025** across 62,113 hourly observations for the AEPAPT load zone (NERC region: RFC, market region: WEST). Full methodology, diagnostics, and discussion are in `Report.pdf`.
+This project develops and evaluates two forecasting approaches for daily energy load (MW) in a deregulated energy market. The SARIMA model outperformed ESM on all accuracy metrics, producing forecasts within approximately 7% of actual daily demand, providing a strong foundation for operational planning and peak-demand management.
 
-## Data
+## Methodology
 
-| Field | Detail |
-|---|---|
-| Source | PJM energy market |
-| Granularity | Hourly MW → aggregated to daily total MW |
-| Raw rows | 62,113 |
-| Date range | Aug 1, 2018 – Aug 31, 2025 |
-| Target | `daily_total` (sum of hourly `mw` per day) |
+- **Data** — Hourly MW load data from PJM's Data Miner (AEPAPT region), aggregated to daily totals; 1,857 training observations (Aug 2018–Aug 2023) and 366 validation observations (Sep 2023–Aug 2024)
+- **ESM model selection** — Six candidate models compared via AICc; automated ETS search identified the best-fit model with multiplicative error, no trend, and additive seasonality — ETS(M,N,A)
+- **SARIMA model selection** — Dual seasonality (weekly and yearly) addressed with Fourier terms (K=3 weekly, K=2 yearly), selected via grid search and AICc elbow plot; one non-seasonal difference applied based on KPSS testing; AR/MA terms identified from ACF/PACF analysis and validated with a Ljung-Box white noise test
+- **Final SARIMA model** — SARIMAX(3,1,1)(2,0,2) with weekly (K=3) and yearly (K=2) Fourier terms
 
-**Train / Validation / Test Split**
+## Model Performance
 
-| Split | Period |
-|---|---|
-| Train | Aug 2018 – Aug 2023 |
-| Validation | Sep 2023 – Aug 2024 |
-| Test | Sep 2024 – Jan 2025 |
-
-## Results
-
-| Model | Validation MAPE | Validation MAE |
+| Model | MAE | MAPE |
 |---|---|---|
-| ETS(M,N,A) | 10.23% | 11,333 MW |
-| **SARIMAX(3,1,1)(2,0,2) + Fourier (Kw=3, Ky=2)** | **6.81%** | **7,296 MW** |
+| ESM — ETS(M,N,A) | 11,332.69 MW | 10.23% |
+| SARIMA — (3,1,1)(2,0,2) | 7,296.90 MW | 6.81% |
 
-The SARIMAX model passed the Ljung-Box white noise test; the auto-search ARIMA did not and was excluded. See `Report.pdf` for full model diagnostics, Fourier term selection, and residual analysis.
+The SARIMA model captures both weekly fluctuations and the broader yearly seasonal pattern, including winter peak demand, where the ESM model falls short.
 
 ## Repository Structure
 
 ```
-Energy-Load-Forecasting/
-├── Energy_Forecasting.Rmd   # Full analysis: data prep, ETS, ARIMA modeling, plots
-├── energy_2025.csv          # Raw hourly PJM load data (Aug 2018 – Aug 2025)
-└── Report.pdf               # Written report with results, diagnostics, and discussion
+energy-load-forecasting/
+├── energy_2025.csv
+├── Energy_Forecasting.Rmd
+└── reports/
+    └── Report.pdf
 ```
 
-## Dependencies
+## Getting Started
 
 ```r
-tidyverse, fpp3, forecast, fable, fabletools, ggplot2
+# Required packages
+install.packages(c("tidyverse", "fpp3", "forecast", "fable", "fabletools"))
+
+# Open and knit the R Markdown file
+rmarkdown::render("Energy_Forecasting.Rmd")
 ```
 
-## Usage
+## Tools & Libraries
 
-1. Open `Energy_Forecasting.Rmd` in RStudio.
-2. Data loads from the public GitHub raw URL by default. To work offline, update the `read_csv()` path on line 23 to point to `energy_2025.csv`.
-3. Knit to HTML to reproduce all plots and model outputs.
-
-## Author
-
-Steven Meeks — November 2025
+![R](https://img.shields.io/badge/R-4.0+-blue)
+![fable](https://img.shields.io/badge/fable-ESM%20%7C%20ARIMA-orange)
+![fpp3](https://img.shields.io/badge/fpp3-time%20series-green)
