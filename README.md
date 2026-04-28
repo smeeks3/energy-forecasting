@@ -1,6 +1,6 @@
 # Energy Load Forecasting
 
-A time series forecasting project for American Electric Power's Appalachian Power Territory (AEPAPT), comparing Exponential Smoothing (ESM) and Seasonal ARIMA (SARIMA) models to predict total daily energy demand. The full business write-up is available in `reports/Report.pdf`.
+A time series forecasting project for American Electric Power's Appalachian Power Territory (AEPAPT), comparing Exponential Smoothing (ESM) and Seasonal ARIMA (SARIMA) models to predict total daily energy demand. The full business write-up is available in `Report.pdf`.
 
 ## Overview
 
